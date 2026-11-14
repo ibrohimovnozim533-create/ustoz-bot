@@ -1418,9 +1418,8 @@ def serve_health() -> None:
 
 def self_ping() -> None:
     """Render bepul rejasi 15 daqiqada uxlaydi — har 5 daqiqada oʻziga soʻrov yuboramiz."""
-    base = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    if not base:
-        return
+    base = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")
+            or "https://ustoz-bot.onrender.com").rstrip("/")
     url = base + "/health"
     kl = logging.getLogger("keepalive")
     while True:
