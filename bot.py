@@ -60,6 +60,15 @@ def _path(env: str, default: str) -> Path:
     return path if path.is_absolute() else (BASE_DIR / path)
 
 
+def _db_path() -> Path:
+    """DB yoʻli: env'dagi yoʻl boʻlmasa, skript yonidagi bot.db ishlatiladi."""
+    path = _path("DB_PATH", "bot.db")
+    local = BASE_DIR / "bot.db"
+    if not path.exists() and local.exists():
+        return local
+    return path
+
+
 @dataclass
 class Config:
     bot_token: str
@@ -96,7 +105,7 @@ def load() -> Config:
     cfg = Config(
         bot_token=os.getenv("BOT_TOKEN", "").strip(),
         course_dir=_path("COURSE_DIR", "course"),
-        db_path=_path("DB_PATH", "bot.db"),
+        db_path=_db_path(),
         llm_chain=_chain(os.getenv("LLM", "gemini")),
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         gemini_model=gemini_model,
@@ -535,7 +544,8 @@ QOIDALAR:
    Hech qachon oʻzingdan maʼlumot toʻqima.
 2. Oʻzbek tilida, sodda va tushunarli yoz. Kerak boʻlsa hayotiy misol keltir.
 3. Javob 3–6 jumladan oshmasin (dars — alohida koʻrsatma bilan — bundan mustasno). Uzun mavzuni boʻlaklarga boʻlib tushuntir.
-4. Har javob oxirida talabaga BITTA tekshiruv savoli ber (uni "Savol:" deb boshlab yoz).
+4. Har javob oxirida talabaga BITTA qisqa tekshiruv savoli ber (uni "Savol:" deb boshlab yoz).
+   Savol ikki qismli boʻlmasin va aynan sen tushuntirgan narsaga oid boʻlsin.
 5. Talaba xato qilsa — avval xatoni muloyim koʻrsat, keyin toʻgʻri yoʻlni koʻrsat. Hech qachon "notoʻgʻri" deb qoʻyib yuborma, sababini tushuntir.
 6. Emoji juda kam ishlat (0–2 ta).
 7. Manba qatorini ("Manba: ...") oʻzing yozma — tizim uni avtomatik qoʻshadi."""
@@ -701,6 +711,60 @@ def check_messages(
     ]
 
 
+CHECK_PERSONA = """Sen — "Ustoz" ismli tajribali oʻqituvchisan va talabaning javobini baholaysan.
+
+TIL: faqat oʻzbek tilida, LOTIN yozuvida yoz. Kirill harflarini ishlatma.
+Imlo: aksiya, aksiyador, obligatsiya, dividend, broker, tiker, emitent.
+
+QOIDALAR:
+1. Bu — BAHOLASH vazifasi. Javobni rad etish taqiqlanadi:
+   "Bu savol kurs materialida yoritilmagan" kabi iborani hech qachon yozma.
+2. Savol ochiq — soʻzma-soʻz mos kelishi shart emas. Maʼno toʻgʻri boʻlsa, "Toʻgʻri" deb baholang.
+3. Kontekst qisqa boʻlsa ham, talabaning javobi mazmunan toʻgʻri boʻlsa — "Toʻgʻri".
+4. Xato boʻlsa — muloyim tushuntir va toʻgʻri yoʻlni koʻrsat.
+5. Emoji 0–1 ta. Manba qatorini yozma."""
+
+
+QA_CHECK = """Sen oʻqituvchisan. Talaba senga berilgan savolga javob yozdi.
+
+SAVOL: {question}
+TALABA JAVOBI: {answer}
+
+KURS MATERIALI (kontekst):
+---
+{context}
+---
+
+Javobni OCHIQ baholang — soʻzma-soʻz mos kelishi shart emas, maʼno muhim:
+- talaba asosiy maʼnoni toʻgʻri aytgan boʻlsa — "Toʻgʻri"
+- mazmunning bir qismi toʻgʻri boʻlsa — "Qisman toʻgʻri"
+- mavzuga aloqasi yoʻq yoki xato boʻlsa — "Notoʻgʻri"
+
+Javobni shunday yoz:
+1. Birinchi qatorda: "Toʻgʻri", "Qisman toʻgʻri" yoki "Notoʻgʻri".
+2. 2–3 jumlada izoh: nima toʻgʻri, nimani qoʻshish mumkin.
+3. "Toʻgʻri javob: <1–2 jumlalik namuna>"
+4. Oxirida ragʻbatlantiruvchi 1 jumla.
+
+6 jumladan oshmang."""
+
+
+def qa_check_messages(
+    question: str, answer: str, chunks: list[str]
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": CHECK_PERSONA},
+        {
+            "role": "user",
+            "content": QA_CHECK.format(
+                question=question,
+                answer=answer[:800],
+                context=_context(chunks, 4000),
+            ),
+        },
+    ]
+
+
 FALLBACK = """Talaba kurs mavzusidan tashqari yoki noaniq xabar yozdi:
 
 "{text}"
@@ -745,7 +809,7 @@ TEXT_CMD = re.compile(
     re.IGNORECASE,
 )
 
-_TOPIC_RE = re.compile(r"^\d+\s*[-–]\s*кун\s*:\s*(.+)$", re.IGNORECASE)
+_TOPIC_RE = re.compile(r"^\d+\s*[-–]\s*(?:кун|kun)\s*:\s*(.+)$", re.IGNORECASE)
 
 
 def topic_question(title: str) -> str:
@@ -1039,6 +1103,17 @@ class LLM:
 # ==================== mini ====================
 log = logging.getLogger("mini")
 
+_ASKED_RE = re.compile(r"(?s)\bSavol\s*:\s*(.+?)\s*$")
+
+
+def asked_question(text: str) -> str:
+    """Bot javob oxirida bergan tekshiruv savolini ajratib oladi."""
+    match = _ASKED_RE.search(text or "")
+    if not match:
+        return ""
+    question = match.group(1).strip().strip('"“”')
+    return question if len(question) > 8 else ""
+
 START_TEXT = (
     "Assalomu alaykum! 👋\n\n"
     "Men — Ustoz, sizning kurs oʻqituvchingizman.\n"
@@ -1294,6 +1369,27 @@ class MiniBot:
             await self.send(chat_id, verdict)
             return
 
+        if state and state["kind"] == "qa":
+            await self.typing(chat_id)
+            ctx = [c for c in state.get("context") or [] if c]
+            if not ctx:
+                ctx = [c["body"] for c in self.rag.search(state["question"], limit=4)]
+            if ctx:
+                try:
+                    verdict = await self.llm.chat(
+                        qa_check_messages(state["question"], text, ctx),
+                        temperature=0.2,
+                        max_tokens=600,
+                    )
+                    verdict = to_latin(verdict)
+                except LLMError as exc:
+                    await self.error(chat_id, exc)
+                    return
+                await self.send(chat_id, verdict)
+                return
+            # kontekst topilmasa — javobni oddiy savol sifatida koʻrib chiqamiz
+            text = f"{state['question']} {text}".strip()
+
         if state and state["kind"] == "lesson":
             await self.typing(chat_id)
             try:
@@ -1326,7 +1422,15 @@ class MiniBot:
             except LLMError as exc:
                 await self.error(chat_id, exc)
                 return
-            await self.send(chat_id, to_latin(answer))
+            answer = to_latin(answer)
+            question = asked_question(answer)
+            await self.send(chat_id, answer)
+            if question:
+                self.states[chat_id] = {
+                    "kind": "qa",
+                    "question": question,
+                    "context": [],
+                }
             return
 
         context = [c["body"] for c in chunks]
@@ -1352,9 +1456,19 @@ class MiniBot:
                 ),
                 "",
             )
+        question = asked_question(answer)
+        answer = re.sub(r"(?s)\n*\s*Savol\s*:.*$", "", answer).strip()
         if source:
             answer = f"{answer}\n\nManba: {source}"
+        if question:
+            answer = f"{answer}\n\nSavol: {question}"
         await self.send(chat_id, answer)
+        if question:
+            self.states[chat_id] = {
+                "kind": "qa",
+                "question": question,
+                "context": context,
+            }
 
     # ---------------- polling ----------------
     async def on_update(self, update: dict) -> None:
