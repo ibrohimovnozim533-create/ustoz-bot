@@ -1681,12 +1681,42 @@ async def bot_main() -> None:
 
 
 # ==================== health server + ishga tushirish ====================
+def tts_check() -> bytes:
+    """Ovoz sinovi: edge-tts haqiqatan ishlayotganini tekshiradi."""
+    import asyncio
+
+    import edge_tts
+
+    async def run() -> bytes:
+        buf = bytearray()
+        async for chunk in edge_tts.Communicate(
+            "Salom, bu ovoz sinovi.", "uz-UZ-SardorNeural"
+        ).stream():
+            if chunk["type"] == "audio":
+                buf.extend(chunk["data"])
+        return bytes(buf)
+
+    return asyncio.run(run())
+
+
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
-        self.send_response(200)
+        path = self.path.rstrip("/") or "/"
+        if path == "/tts":
+            try:
+                body = f"tts ok: {len(tts_check())} bayt".encode()
+                code = 200
+            except Exception as exc:  # noqa: BLE001
+                body = f"tts xato: {exc}".encode()
+                code = 500
+        elif path == "/health":
+            body, code = b"ok", 200
+        else:
+            body, code = b"ustoz-bot", 404
+        self.send_response(code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"ok")
+        self.wfile.write(body)
 
     def log_message(self, *args):  # noqa: D401
         pass
