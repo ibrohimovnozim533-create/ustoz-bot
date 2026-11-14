@@ -237,6 +237,11 @@ CREATE TABLE IF NOT EXISTS lessons (
     body       TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS prefs (
+    user_id    INTEGER PRIMARY KEY,
+    voice      INTEGER NOT NULL DEFAULT 0,
+    voice_name TEXT NOT NULL DEFAULT 'sardor'
+);
 CREATE TABLE IF NOT EXISTS quizzes (
     module_id  INTEGER PRIMARY KEY,
     question   TEXT NOT NULL,
@@ -256,6 +261,24 @@ class DB:
         conn = sqlite3.connect(self.path, timeout=15)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def get_voice(self, user_id: int) -> tuple[bool, str]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT voice, voice_name FROM prefs WHERE user_id=?", (user_id,)
+            ).fetchone()
+        if not row:
+            return False, "sardor"
+        return bool(row["voice"]), (row["voice_name"] or "sardor")
+
+    def set_voice(self, user_id: int, enabled: bool, name: str = "sardor") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO prefs (user_id, voice, voice_name) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET voice=excluded.voice, "
+                "voice_name=excluded.voice_name",
+                (user_id, 1 if enabled else 0, name),
+            )
 
     def touch_user(self, user_id: int, name: str, username: str | None) -> None:
         now = time.time()
@@ -1103,7 +1126,31 @@ class LLM:
 # ==================== mini ====================
 log = logging.getLogger("mini")
 
+VOICES = {
+    "sardor": "uz-UZ-SardorNeural",
+    "madina": "uz-UZ-MadinaNeural",
+}
+VOICE_NAMES = {"sardor": "Sardor (erkak ovozi)", "madina": "Madina (ayol ovozi)"}
+
 _ASKED_RE = re.compile(r"(?s)\bSavol\s*:\s*(.+?)\s*$")
+_MD_RE = re.compile(r"[*_`#>\[\]]")
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\u2190-\u21FF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]"
+)
+
+
+def speech_text(text: str) -> str:
+    """Ovozga aytiladigan toza matn (manba, belgilar va emojilarsiz)."""
+    lines = [
+        line
+        for line in (text or "").splitlines()
+        if not line.strip().lower().startswith("manba:")
+    ]
+    out = _MD_RE.sub("", " ".join(lines))
+    out = _EMOJI_RE.sub("", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out[:3000]
+
 
 
 def asked_question(text: str) -> str:
@@ -1126,7 +1173,8 @@ HELP_TEXT = (
     "/kurs — modullar roʻyxati\n"
     "/dars 1 — 1-modul darsini boshlash\n"
     "/test 1 — 1-moduldan test\n"
-    "/progress — natijalarim\n\n"
+    "/progress — natijalarim\n"
+    "/ovoz — ovozli javob (matn + ovoz)\n\n"
     "Savolingizni oddiy matn bilan yozsangiz ham boʻladi:\n"
     "masalan: \"Bu mavzuni soddaroq tushuntir\""
 )
@@ -1157,9 +1205,57 @@ class MiniBot:
             raise RuntimeError(f"{method}: {data.get('description')}")
         return data["result"]
 
-    async def send(self, chat_id: int, text: str) -> None:
+    async def send(self, chat_id: int, text: str, voice: bool = False) -> None:
         for part in split_text(text):
             await self.api("sendMessage", chat_id=chat_id, text=part)
+        try:
+            enabled, name = self.db.get_voice(chat_id)
+        except Exception:  # noqa: BLE001
+            enabled, name = False, "sardor"
+        if enabled and voice:
+            await self.speak(chat_id, text, name)
+
+    async def api_file(
+        self, method: str, chat_id: int, audio: bytes, **params
+    ) -> None:
+        data = {"chat_id": str(chat_id)}
+        data.update({k: str(v) for k, v in params.items()})
+        resp = await self.client.post(
+            self.base + method,
+            data=data,
+            files={"audio": ("ustoz.mp3", audio, "audio/mpeg")},
+        )
+        payload = resp.json()
+        if not payload.get("ok"):
+            raise RuntimeError(f"{method}: {payload.get('description')}")
+
+    async def speak(self, chat_id: int, text: str, name: str = "sardor") -> None:
+        """Matnni oʻzbek ovoziga aylantirib, audio xabar qilib yuboradi."""
+        clean = speech_text(text)
+        if not clean:
+            return
+        try:
+            import edge_tts
+        except ImportError:
+            log.warning("edge-tts oʻrnatilmagan — ovoz yuborilmadi")
+            return
+        voice = VOICES.get(name, VOICES["sardor"])
+        try:
+            audio = bytearray()
+            async for chunk in edge_tts.Communicate(clean, voice).stream():
+                if chunk["type"] == "audio":
+                    audio.extend(chunk["data"])
+            if not audio:
+                return
+            await self.api_file(
+                "sendAudio",
+                chat_id,
+                bytes(audio),
+                title="Ustoz",
+                performer="Ustoz",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ovoz yuborilmadi: %s", exc)
 
     async def typing(self, chat_id: int) -> None:
         try:
@@ -1221,7 +1317,9 @@ class MiniBot:
 
         text = f"{body}\n\nSavol: {question}"
         self.db.set_progress(uid, module["id"], "in_progress")
-        await self.send(chat_id, f"{text}\n\nManba: {to_latin(module['title'])}")
+        await self.send(
+            chat_id, f"{text}\n\nManba: {to_latin(module['title'])}", voice=True
+        )
 
         self.states[chat_id] = {
             "kind": "lesson",
@@ -1276,9 +1374,39 @@ class MiniBot:
             chat_id,
             f"📝 TEST — {to_latin(module['title'])}\n\n{question}\n\n"
             "Javobingizni yozing.",
+            voice=True,
         )
 
     # ---------------- progress / xarita ----------------
+    async def send_voice_menu(self, chat_id: int, uid: int, args: str) -> None:
+        enabled, name = self.db.get_voice(chat_id)
+        arg = args.strip().lower()
+        if arg in VOICES:
+            self.db.set_voice(chat_id, True, arg)
+            await self.send(
+                chat_id,
+                f"🔊 Ovozli rejim yoqildi — {VOICE_NAMES[arg]}.",
+                voice=True,
+            )
+            return
+        if arg in {"ochir", "oʻchir", "off", "0", "yoq"}:
+            self.db.set_voice(chat_id, False, name)
+            await self.send(chat_id, "🔇 Ovozli rejim oʻchirildi.")
+            return
+        if enabled:
+            self.db.set_voice(chat_id, False, name)
+            await self.send(chat_id, "🔇 Ovozli rejim oʻchirildi.")
+            return
+        self.db.set_voice(chat_id, True, name)
+        await self.send(
+            chat_id,
+            f"🔊 Ovozli rejim yoqildi — {VOICE_NAMES[name]}.\n"
+            "Bundan buyon har bir javobimni matn bilan birga ovozli ham "
+            "yuboraman.\n\nOʻchirish: /ovoz\n"
+            "Ovozni almashtirish: /ovoz sardor yoki /ovoz madina",
+            voice=True,
+        )
+
     async def send_progress(self, chat_id: int, uid: int) -> None:
         modules = self.rag.modules()
         if not modules:
@@ -1329,6 +1457,9 @@ class MiniBot:
             if cmd in {"yordam", "help"}:
                 await self.send(chat_id, HELP_TEXT)
                 return
+            if cmd in {"ovoz", "voice"}:
+                await self.send_voice_menu(chat_id, uid, args)
+                return
 
         # 2) "dars 2", "test 3" kabi matn koʻrinishidagi buyruqlar
         match = TEXT_CMD.match(text)
@@ -1366,7 +1497,7 @@ class MiniBot:
             self.db.set_progress(uid, state["module_id"], "done", score=80)
             if "toʻgʻri javob" not in verdict.lower():
                 verdict = f"{verdict}\n\nToʻgʻri javob: {state['expected']}"
-            await self.send(chat_id, verdict)
+            await self.send(chat_id, verdict, voice=True)
             return
 
         if state and state["kind"] == "qa":
@@ -1385,7 +1516,7 @@ class MiniBot:
                 except LLMError as exc:
                     await self.error(chat_id, exc)
                     return
-                await self.send(chat_id, verdict)
+                await self.send(chat_id, verdict, voice=True)
                 return
             # kontekst topilmasa — javobni oddiy savol sifatida koʻrib chiqamiz
             text = f"{state['question']} {text}".strip()
@@ -1408,7 +1539,7 @@ class MiniBot:
                 await self.error(chat_id, exc)
                 return
             self.db.set_progress(uid, state["module_id"], "done", score=85)
-            await self.send(chat_id, verdict)
+            await self.send(chat_id, verdict, voice=True)
             return
 
         # 4) erkin savol — kurs materialidan qidiramiz
@@ -1424,7 +1555,7 @@ class MiniBot:
                 return
             answer = to_latin(answer)
             question = asked_question(answer)
-            await self.send(chat_id, answer)
+            await self.send(chat_id, answer, voice=True)
             if question:
                 self.states[chat_id] = {
                     "kind": "qa",
@@ -1462,7 +1593,7 @@ class MiniBot:
             answer = f"{answer}\n\nManba: {source}"
         if question:
             answer = f"{answer}\n\nSavol: {question}"
-        await self.send(chat_id, answer)
+        await self.send(chat_id, answer, voice=True)
         if question:
             self.states[chat_id] = {
                 "kind": "qa",
