@@ -12,6 +12,7 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -1415,12 +1416,29 @@ def serve_health() -> None:
     server.serve_forever()
 
 
+def self_ping() -> None:
+    """Render bepul rejasi 15 daqiqada uxlaydi — har 5 daqiqada oʻziga soʻrov yuboramiz."""
+    base = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not base:
+        return
+    url = base + "/health"
+    kl = logging.getLogger("keepalive")
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                kl.info("keepalive: %s", resp.status)
+        except Exception as exc:  # noqa: BLE001
+            kl.warning("keepalive xatosi: %s", exc)
+        time.sleep(300)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     threading.Thread(target=serve_health, daemon=True).start()
+    threading.Thread(target=self_ping, daemon=True).start()
     log = logging.getLogger("deploy")
     while True:
         try:
