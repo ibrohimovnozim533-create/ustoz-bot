@@ -177,6 +177,15 @@ def to_cyrillic(text: str) -> str:
     return "".join(out)
 
 
+_LATIN_FIX = {
+    "aktsiya": "aksiya", "Aktsiya": "Aksiya",
+    "aktsiyalar": "aksiyalar", "aktsiyador": "aksiyador",
+    "divident": "dividend", "Divident": "Dividend",
+    "hioblanadi": "hisoblanadi", "hiob": "hisob",
+    "obligatsya": "obligatsiya", "emitentni": "emitentni",
+}
+
+
 def to_latin(text: str) -> str:
     # Imlo istisnolari: "акция" -> "aksiya" (ts emas)
     text = text.replace("акция", "aksiya").replace("Акция", "Aksiya")
@@ -192,7 +201,10 @@ def to_latin(text: str) -> str:
         if ch.lower() == "е" and (idx == 0 or not text[idx - 1].isalnum()):
             rep = ("Y" if ch.isupper() else "y") + rep
         out.append(rep)
-    return "".join(out)
+    text = "".join(out)
+    for wrong, right in _LATIN_FIX.items():
+        text = text.replace(wrong, right)
+    return text
 
 # ==================== db ====================
 SCHEMA = """
@@ -522,13 +534,13 @@ QOIDALAR:
    "Bu savol kurs materialida yoritilmagan. Keling, kurs doirasidagi mavzuga qaytamiz."
    Hech qachon oʻzingdan maʼlumot toʻqima.
 2. Oʻzbek tilida, sodda va tushunarli yoz. Kerak boʻlsa hayotiy misol keltir.
-3. Javob 3–6 jumladan oshmasin. Uzun mavzuni boʻlaklarga boʻlib tushuntir.
+3. Javob 3–6 jumladan oshmasin (dars — alohida koʻrsatma bilan — bundan mustasno). Uzun mavzuni boʻlaklarga boʻlib tushuntir.
 4. Har javob oxirida talabaga BITTA tekshiruv savoli ber (uni "Savol:" deb boshlab yoz).
 5. Talaba xato qilsa — avval xatoni muloyim koʻrsat, keyin toʻgʻri yoʻlni koʻrsat. Hech qachon "notoʻgʻri" deb qoʻyib yuborma, sababini tushuntir.
 6. Emoji juda kam ishlat (0–2 ta).
 7. Manba qatorini ("Manba: ...") oʻzing yozma — tizim uni avtomatik qoʻshadi."""
 
-LESSON = """Quyidagi kurs materiali asosida talaba uchun dars tayyorla.
+LESSON = """Sen tajribali oʻqituvchisan. Darsni materialdan koʻchirib bermaysan — talabaga jonli tushuntirasan.
 
 MODUL: {title}
 
@@ -537,13 +549,39 @@ MATERIAL:
 {context}
 ---
 
-Darsni shunday tuz:
-1. "Bugungi mavzu: ..." — 1 jumla.
-2. Asosiy gʻoyani 3–5 jumlada tushuntir, kerak boʻlsa misol bilan.
-3. "Esda saqlang:" — 2–3 ta qisqa xulosa (nuqtalar bilan).
-4. Darsni shu bilan yakunla. Savol berma — savolni tizim oʻzi qoʻshadi.
+Shu mavzuni darsda oʻqituvchi aytib berayotgandek tushuntir. Aynan shu tuzilishda yoz:
 
-Faqat dars matnini yoz, ortiqcha izoh qoʻshma."""
+Bugungi mavzu: <1 jumla — nima va nima uchun muhim>
+
+Oddiy qilib aytganda:
+<2–3 jumla, hayotiy oʻxshatish bilan. Masalan: "... xuddi ... kabi">
+
+Batafsil:
+1) <tushuncha> — <izoh> + <kichik misol>
+2) <tushuncha> — <izoh> + <kichik misol>
+3) <tushuncha> — <izoh> + <kichik misol>
+
+Hayotiy misol:
+<aniq vaziyat: kim nima qiladi, nima boʻladi, natija qanday>
+
+Adashtirmang:
+- <keng tarqalgan xato yoki tushunmovchilik>
+- <yana bittasi>
+
+Xulosa:
+<2–3 jumla — asosiy fikrni oʻz soʻzing bilan>
+
+Esda saqlang:
+- <qisqa xulosa>
+- <qisqa xulosa>
+- <qisqa xulosa>
+
+Talablar:
+- 900–1900 belgi atrofida yoz; ortiqcha choʻzma.
+- Materialdagi jumlalarni soʻzma-soʻz koʻchirma — oʻz soʻzing bilan qayta ayt.
+- Yangi fakt, raqam, kompaniya yoki sana oʻylab topma — faqat materialdagidan foydalan.
+- Savol berma — savolni tizim oʻzi qoʻshadi.
+- Faqat dars matnini yoz, kirish soʻzi va izohsiz."""
 
 ANSWER = """Talaba savoliga kurs materiali asosida javob ber.
 
