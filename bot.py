@@ -1139,6 +1139,78 @@ _EMOJI_RE = re.compile(
 )
 
 
+def ogg_opus(mp3: bytes) -> tuple[bytes, float]:
+    """MP3 baytlarni Telegram talab qiladigan OGG/OPUS ga oʻgiradi."""
+    try:
+        import io
+
+        import soundfile as sf
+
+        audio, rate = sf.read(io.BytesIO(mp3), dtype="int16")
+        if not len(audio):
+            return b"", 0.0
+        buf = io.BytesIO()
+        sf.write(buf, audio, rate, format="OGG", subtype="OPUS")
+        return buf.getvalue(), len(audio) / float(rate)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ogg ga oʻgirish xatosi: %s", exc)
+        return b"", 0.0
+
+
+_UZ_ONES = ["nol", "bir", "ikki", "uch", "toʻrt", "besh", "olti", "yetti", "sakkiz", "toʻqqiz"]
+_UZ_TENS = ["", "oʻn", "yigirma", "oʻttiz", "qirq", "ellik", "oltmish", "yetmish", "sakson", "toʻqson"]
+_LETTER_NAMES = {
+    "a": "a", "b": "be", "c": "se", "d": "de", "e": "e", "f": "ef", "g": "ge",
+    "h": "he", "i": "i", "j": "je", "k": "ke", "l": "el", "m": "em", "n": "en",
+    "o": "o", "p": "pe", "q": "qu", "r": "er", "s": "es", "t": "te", "u": "u",
+    "v": "ve", "w": "dubl ve", "x": "xe", "y": "ye", "z": "ze",
+}
+_ACRO_FIX = {"OK": "okey", "AI": "a i", "IT": "ay ti"}
+_NUM_RE = re.compile(r"\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?")
+
+
+def _num_words(n: int) -> str:
+    if n < 10:
+        return _UZ_ONES[n]
+    if n < 100:
+        tens, ones = divmod(n, 10)
+        return _UZ_TENS[tens] + (f" {_UZ_ONES[ones]}" if ones else "")
+    if n < 1000:
+        hundreds, rest = divmod(n, 100)
+        head = "yuz" if hundreds == 1 else f"{_UZ_ONES[hundreds]} yuz"
+        return head + (f" {_num_words(rest)}" if rest else "")
+    for base, name in ((10**9, "milliard"), (10**6, "million"), (1000, "ming")):
+        if n >= base:
+            count, rest = divmod(n, base)
+            head = f"{_num_words(count)} {name}"
+            return head + (f" {_num_words(rest)}" if rest else "")
+    return str(n)
+
+
+def _number_words(raw: str) -> str:
+    value = raw.replace("\u00a0", "").replace(" ", "")
+    if "," in value or "." in value:
+        whole, _, frac = re.split(r"([.,])", value, maxsplit=1)[0], None, None
+        parts = re.split(r"[.,]", value)
+        whole, frac = parts[0], "".join(parts[1:])
+        frac_words = " ".join(_UZ_ONES[int(ch)] for ch in frac if ch.isdigit())
+        return f"{_num_words(int(whole or 0))} butun {frac_words}".strip()
+    return _num_words(int(value))
+
+
+def tts_words(text: str) -> str:
+    """Sonlar va qisqartmalarni oʻzbekcha soʻzlarga aylantiradi (aniq talaffuz)."""
+    out = re.sub(r"(\d+)\s*[-–—]\s*(\d+)", r"\1 dan \2 gacha", text)
+    out = re.sub(r"(\d+)\s*[:/]\s*(\d+)", r"\1 va \2", out)
+    out = re.sub(r"(\d+)\s*-\s*([A-Za-z])", r"\1 \2", out)
+    out = _NUM_RE.sub(lambda m: _number_words(m.group(0)), out)
+    out = re.sub(r"\b[A-Z]{2,6}\b", lambda m: _ACRO_FIX.get(m.group(0)) or
+                 " ".join(_LETTER_NAMES.get(ch.lower(), ch.lower()) for ch in m.group(0)), out)
+    out = out.replace("%", " foiz").replace("$", " dollar ").replace("€", " yevro ")
+    out = out.replace("₽", " rubl ").replace("№", " raqam ").replace("&", " va ")
+    return out
+
+
 def speech_text(text: str) -> str:
     """Ovozga aytiladigan toza matn (manba, belgilar va emojilarsiz)."""
     lines = [
@@ -1148,6 +1220,7 @@ def speech_text(text: str) -> str:
     ]
     out = _MD_RE.sub("", " ".join(lines))
     out = _EMOJI_RE.sub("", out)
+    out = tts_words(out)
     out = re.sub(r"\s+", " ", out).strip()
     return out[:3000]
 
@@ -1216,21 +1289,28 @@ class MiniBot:
             await self.speak(chat_id, text, name)
 
     async def api_file(
-        self, method: str, chat_id: int, audio: bytes, **params
+        self,
+        method: str,
+        chat_id: int,
+        payload: bytes,
+        field: str = "audio",
+        filename: str = "ustoz.mp3",
+        mime: str = "audio/mpeg",
+        **params,
     ) -> None:
         data = {"chat_id": str(chat_id)}
         data.update({k: str(v) for k, v in params.items()})
         resp = await self.client.post(
             self.base + method,
             data=data,
-            files={"audio": ("ustoz.mp3", audio, "audio/mpeg")},
+            files={field: (filename, payload, mime)},
         )
-        payload = resp.json()
-        if not payload.get("ok"):
-            raise RuntimeError(f"{method}: {payload.get('description')}")
+        body = resp.json()
+        if not body.get("ok"):
+            raise RuntimeError(f"{method}: {body.get('description')}")
 
     async def speak(self, chat_id: int, text: str, name: str = "sardor") -> None:
-        """Matnni oʻzbek ovoziga aylantirib, audio xabar qilib yuboradi."""
+        """Matnni oʻzbek ovoziga aylantirib, ovozli xabar qilib yuboradi."""
         clean = speech_text(text)
         if not clean:
             return
@@ -1240,17 +1320,39 @@ class MiniBot:
             log.warning("edge-tts oʻrnatilmagan — ovoz yuborilmadi")
             return
         voice = VOICES.get(name, VOICES["sardor"])
+        mp3 = bytearray()
         try:
-            audio = bytearray()
             async for chunk in edge_tts.Communicate(clean, voice).stream():
                 if chunk["type"] == "audio":
-                    audio.extend(chunk["data"])
-            if not audio:
+                    mp3.extend(chunk["data"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ovoz sintezi xatosi: %s", exc)
+            return
+        if not mp3:
+            return
+
+        # Telegram ovozli xabari OGG/OPUS boʻlishi kerak (audio fayl emas —
+        # audio fayllar ketma-ket ijro etilib, eskilari qayta oʻqilardi).
+        ogg, duration = ogg_opus(bytes(mp3))
+        if ogg:
+            try:
+                await self.api_file(
+                    "sendVoice",
+                    chat_id,
+                    ogg,
+                    field="voice",
+                    filename="ustoz.ogg",
+                    mime="audio/ogg",
+                    duration=int(duration),
+                )
                 return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("sendVoice xatosi: %s", exc)
+        try:
             await self.api_file(
                 "sendAudio",
                 chat_id,
-                bytes(audio),
+                bytes(mp3),
                 title="Ustoz",
                 performer="Ustoz",
             )
